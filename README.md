@@ -80,5 +80,3 @@ cnnp/
 ├── cnnp                  # CLI entry point
 └── README.md
 ```
-
-> The `lib/` directory was considered for shared utilities but removed — all reusable logic lives inside the architecture templates themselves.
