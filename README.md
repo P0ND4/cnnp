@@ -67,7 +67,10 @@ Hexagonal/Clean architecture focused on domain isolation. Includes a full auth f
 
 Generates a pre-filled `.env.example` at the project root — copy it to `.env` and fill in your secrets.
 
-See [docs/architecture-clean.md](docs/architecture-clean.md) for the complete structure and conventions.
+**Database:** PostgreSQL. The template requires two schemas inside a single database: `trn` (transactional data) and `cat` (catalogues / reference data). Both must be created before running migrations.
+
+See [docs/architecture-clean.md](docs/architecture-clean.md) for the complete structure and conventions.  
+See [docs/database-setup.md](docs/database-setup.md) for database configuration and schema conventions.
 
 ## Project structure
 

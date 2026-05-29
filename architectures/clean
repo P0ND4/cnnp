@@ -612,13 +612,13 @@ import { CreateDateColumn, DeleteDateColumn, UpdateDateColumn } from 'typeorm';
 
 export abstract class BaseEntity {
   @CreateDateColumn({ type: 'timestamp', name: 'created_at', nullable: true })
-  createdAt: Date;
+  createdAt!: Date;
 
   @UpdateDateColumn({ type: 'timestamp', name: 'updated_at', nullable: true })
-  updatedAt: Date;
+  updatedAt!: Date;
 
   @DeleteDateColumn({ type: 'timestamp', name: 'deleted_at', nullable: true })
-  deletedAt: Date;
+  deletedAt!: Date;
 }
 EOF
 
@@ -630,22 +630,22 @@ import { BaseEntity } from '../base.entity';
 @Entity({ schema: 'trn', name: 'users' })
 export class UserEntity extends BaseEntity {
   @PrimaryGeneratedColumn('uuid')
-  id: string;
+  id!: string;
 
   @Column({ type: 'varchar', length: 255, unique: true })
-  email: string;
+  email!: string;
 
   @Column({ type: 'text' })
-  password: string;
+  password!: string;
 
   @Column({ type: 'varchar', length: 255, name: 'full_name' })
-  fullName: string;
+  fullName!: string;
 
   @Column({ type: 'boolean', name: 'is_active', default: true, nullable: true })
-  isActive: boolean;
+  isActive!: boolean;
 
   @Column({ type: 'timestamp', name: 'email_verified_at', nullable: true })
-  emailVerifiedAt: Date;
+  emailVerifiedAt!: Date;
 
   @Column({
     type: 'varchar',
@@ -654,7 +654,7 @@ export class UserEntity extends BaseEntity {
     nullable: true,
     unique: true,
   })
-  googleId: string | null;
+  googleId!: string | null;
 
   @Column({
     type: 'varchar',
@@ -663,7 +663,7 @@ export class UserEntity extends BaseEntity {
     nullable: true,
     unique: true,
   })
-  appleId: string | null;
+  appleId!: string | null;
 }
 EOF
 
@@ -675,16 +675,16 @@ import { BaseEntity } from '../base.entity';
 @Entity({ schema: 'cat', name: 'roles' })
 export class RoleEntity extends BaseEntity {
   @PrimaryGeneratedColumn()
-  id: number;
+  id!: number;
 
   @Column({ type: 'varchar', length: 120 })
-  name: string;
+  name!: string;
 
   @Column({ type: 'varchar', length: 120 })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'text', nullable: true })
-  description: string;
+  description!: string;
 }
 EOF
 
@@ -696,16 +696,16 @@ import { BaseEntity } from '../base.entity';
 @Entity({ schema: 'cat', name: 'permissions' })
 export class PermissionEntity extends BaseEntity {
   @PrimaryGeneratedColumn()
-  id: number;
+  id!: number;
 
   @Column({ type: 'varchar', length: 120 })
-  name: string;
+  name!: string;
 
   @Column({ type: 'varchar', length: 120 })
-  slug: string;
+  slug!: string;
 
   @Column({ type: 'text', nullable: true })
-  description: string;
+  description!: string;
 }
 EOF
 
@@ -725,21 +725,21 @@ import { RoleEntity } from './role.entity';
 @Entity({ schema: 'cat', name: 'permission_role' })
 export class PermissionRoleEntity extends BaseEntity {
   @PrimaryGeneratedColumn()
-  id: number;
+  id!: number;
 
   @Column({ type: 'int', name: 'permission_id' })
-  permissionId: number;
+  permissionId!: number;
 
   @ManyToOne(() => PermissionEntity)
   @JoinColumn({ name: 'permission_id' })
-  permission: PermissionEntity;
+  permission!: PermissionEntity;
 
   @Column({ type: 'int', name: 'role_id' })
-  roleId: number;
+  roleId!: number;
 
   @ManyToOne(() => RoleEntity)
   @JoinColumn({ name: 'role_id' })
-  role: RoleEntity;
+  role!: RoleEntity;
 }
 EOF
 
@@ -759,21 +759,21 @@ import { RoleEntity } from './role.entity';
 @Entity({ schema: 'trn', name: 'role_user' })
 export class RoleUserEntity extends BaseEntity {
   @PrimaryGeneratedColumn()
-  id: number;
+  id!: number;
 
   @Column({ type: 'int', name: 'role_id' })
-  roleId: number;
+  roleId!: number;
 
   @ManyToOne(() => RoleEntity)
   @JoinColumn({ name: 'role_id' })
-  role: RoleEntity;
+  role!: RoleEntity;
 
   @Column({ type: 'uuid', name: 'user_id' })
-  userId: string;
+  userId!: string;
 
   @ManyToOne(() => UserEntity)
   @JoinColumn({ name: 'user_id' })
-  user: UserEntity;
+  user!: UserEntity;
 }
 EOF
 
