@@ -78,4 +78,4 @@ See [docs/database-setup.md](docs/database-setup.md) for database configuration 
 
 ---
 
-<p align="center">Made with ❤️ by <a href="https://github.com/melvincolmenares">Melvin Colmenares</a></p>
+<p align="center">Made with ❤️ by <a href="https://github.com/P0ND4">Melvin Colmenares</a></p>
