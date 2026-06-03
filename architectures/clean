@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 PROJECT_PATH="$1"
 PACKAGE_MANAGER="${2:-npm}"
 SKIP_INSTALL="${3:-false}"
+CNNP_DIR="${4:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SRC="$PROJECT_PATH/src"
 
 touch \
@@ -13,6 +13,9 @@ touch \
   "$PROJECT_PATH/docker-compose.yml" \
   "$PROJECT_PATH/setup-dev.sh" \
   "$PROJECT_PATH/setup-prod.sh"
+
+mkdir -p "$PROJECT_PATH/.claude/skills/architecture"
+cp "$CNNP_DIR/skills/clean-architecture.md" "$PROJECT_PATH/.claude/skills/architecture/SKILL.md"
 
 cat > "$PROJECT_PATH/.env.example" << 'EOF'
 NODE_ENV=development
@@ -61,17 +64,26 @@ mkdir -p \
   "$SRC/contexts/shared/constants" \
   "$SRC/contexts/shared/decorators" \
   "$SRC/contexts/shared/domain/entities/auth" \
+  "$SRC/contexts/shared/domain/errors" \
+  "$SRC/contexts/shared/domain/ports" \
   "$SRC/contexts/shared/domain/repositories/auth" \
+  "$SRC/contexts/shared/domain/validators" \
   "$SRC/contexts/shared/guards" \
+  "$SRC/contexts/shared/infrastructure/filters" \
   "$SRC/contexts/shared/infrastructure/repositories/auth" \
+  "$SRC/contexts/shared/infrastructure/services" \
   "$SRC/contexts/shared/interceptors" \
   "$SRC/contexts/user/application/constants" \
-  "$SRC/contexts/user/application/dtos" \
-  "$SRC/contexts/user/application/ports" \
   "$SRC/contexts/user/application/use-cases" \
+  "$SRC/contexts/user/domain/contracts" \
+  "$SRC/contexts/user/domain/dtos" \
+  "$SRC/contexts/user/domain/errors" \
+  "$SRC/contexts/user/domain/ports" \
   "$SRC/contexts/user/infrastructure/constants" \
   "$SRC/contexts/user/infrastructure/http-api/v1/auth/controllers" \
   "$SRC/contexts/user/infrastructure/http-api/v1/auth/requests" \
+  "$SRC/contexts/user/infrastructure/http-api/v1/auth/responses" \
+  "$SRC/contexts/user/infrastructure/http-api/validators" \
   "$SRC/contexts/user/infrastructure/services" \
   "$SRC/database" \
   "$SRC/scripts" \
@@ -79,16 +91,14 @@ mkdir -p \
   "$SRC/shared/logger" \
   "$SRC/templates/mail" \
   "$SRC/templates/partials" \
-  "$SRC/templates/types" \
   "$SRC/types"
 
 touch \
   "$SRC/contexts/shared/application/.gitkeep" \
-  "$SRC/contexts/shared/decorators/.gitkeep" \
-  "$SRC/contexts/shared/guards/.gitkeep" \
+  "$SRC/contexts/shared/domain/validators/.gitkeep" \
   "$SRC/contexts/user/infrastructure/constants/.gitkeep" \
+  "$SRC/contexts/user/infrastructure/http-api/validators/.gitkeep" \
   "$SRC/scripts/.gitkeep" \
-  "$SRC/templates/types/.gitkeep" \
   "$SRC/types/.gitkeep"
 
 # ─── main.ts ────────────────────────────────────────────────────────────────
@@ -99,7 +109,6 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app/app.module';
 import { FileLoggerService } from './shared/logger/file-logger.service';
 import { API } from './app/routes/route.constants';
-import { ApiResponseInterceptor } from './contexts/shared/interceptors/api.response.interceptor';
 import { httpLogger } from './shared/http-logger/http-logger';
 
 async function bootstrap() {
@@ -112,7 +121,6 @@ async function bootstrap() {
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }),
   );
-  app.useGlobalInterceptors(new ApiResponseInterceptor());
   app.setGlobalPrefix(API);
 
   const swaggerConfig = new DocumentBuilder()
@@ -144,11 +152,15 @@ import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis'
 import { MailerModule } from '@nestjs-modules/mailer';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { JwtModule } from '@nestjs/jwt';
 import { minutes, ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { databaseConfig } from 'src/config/database.config';
 import { getMailConfig } from 'src/config/mail.config';
+import { DomainExceptionFilter } from 'src/contexts/shared/infrastructure/filters/domain-exception.filter';
+import { JwtAuthGuard } from 'src/contexts/shared/guards/jwt-auth.guard';
+import { ApiResponseInterceptor } from 'src/contexts/shared/interceptors/api.response.interceptor';
 import { SharedModule } from 'src/contexts/shared/shared.module';
 import { UserModule } from 'src/contexts/user/infrastructure/main.module';
 import { RedisModule } from 'src/database/redis.module';
@@ -156,6 +168,14 @@ import { RedisModule } from 'src/database/redis.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, cache: true }),
+    RedisModule,
+    JwtModule.registerAsync({
+      global: true,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        secret: config.get<string>('JWT_SECRET'),
+      }),
+    }),
     ThrottlerModule.forRootAsync({
       imports: [RedisModule],
       inject: ['REDIS_CLIENT'],
@@ -177,7 +197,12 @@ import { RedisModule } from 'src/database/redis.module';
     UserModule,
   ],
   controllers: [],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [
+    { provide: APP_FILTER, useClass: DomainExceptionFilter },
+    { provide: APP_INTERCEPTOR, useClass: ApiResponseInterceptor },
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+  ],
 })
 export class AppModule {}
 EOF
@@ -191,19 +216,9 @@ EOF
 cat > "$SRC/config/database.config.ts" << 'EOF'
 import { ConfigService } from '@nestjs/config';
 import { TypeOrmModuleOptions } from '@nestjs/typeorm';
-import { PermissionRoleEntity } from 'src/contexts/shared/domain/entities/auth/permission-role.entity';
-import { PermissionEntity } from 'src/contexts/shared/domain/entities/auth/permission.entity';
-import { RoleUserEntity } from 'src/contexts/shared/domain/entities/auth/role-user.entity';
-import { RoleEntity } from 'src/contexts/shared/domain/entities/auth/role.entity';
 import { UserEntity } from 'src/contexts/shared/domain/entities/auth/user.entity';
 
-export const ALL_ENTITIES = [
-  UserEntity,
-  PermissionEntity,
-  RoleEntity,
-  PermissionRoleEntity,
-  RoleUserEntity,
-];
+export const ALL_ENTITIES = [UserEntity];
 
 export const databaseConfig = (
   configService: ConfigService,
@@ -482,8 +497,8 @@ const createRedisClient = (
 export class RedisModule {}
 EOF
 
-# ─── contexts/shared/api.response.ts ────────────────────────────────────────
-cat > "$SRC/contexts/shared/api.response.ts" << 'EOF'
+# ─── contexts/shared/interceptors/api.response.ts ───────────────────────────
+cat > "$SRC/contexts/shared/interceptors/api.response.ts" << 'EOF'
 export interface ApiResponse<T = any> {
   success: boolean;
   data?: T;
@@ -512,21 +527,6 @@ export class ApiResponseBuilder {
 }
 EOF
 
-# ─── contexts/shared/constants/jwt.constants.ts ──────────────────────────────
-cat > "$SRC/contexts/shared/constants/jwt.constants.ts" << 'EOF'
-export const JWT_EXPIRATION = '15m';
-
-export const JWT_REFRESH_EXPIRATION = '7d';
-
-export const BLACKLIST_TTL_SECONDS = 15 * 60;
-
-export const REFRESH_BLACKLIST_TTL_SECONDS = 7 * 24 * 60 * 60;
-
-export const TOKEN_LIFETIME_DESCRIPTION = '15 minutes';
-
-export const REFRESH_TOKEN_LIFETIME_DESCRIPTION = '7 days';
-EOF
-
 # ─── contexts/shared/interceptors/api.response.interceptor.ts ────────────────
 cat > "$SRC/contexts/shared/interceptors/api.response.interceptor.ts" << 'EOF'
 import {
@@ -537,7 +537,7 @@ import {
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
-import { ApiResponse } from '../api.response';
+import { ApiResponse } from './api.response';
 
 @Injectable()
 export class ApiResponseInterceptor<T> implements NestInterceptor<
@@ -570,39 +570,128 @@ export class ApiResponseInterceptor<T> implements NestInterceptor<
 }
 EOF
 
-# ─── contexts/shared/infrastructure/token-blacklist.service.ts ───────────────
-cat > "$SRC/contexts/shared/infrastructure/token-blacklist.service.ts" << 'EOF'
-import { Injectable, Inject } from '@nestjs/common';
-import { Redis } from 'ioredis';
-import { BLACKLIST_TTL_SECONDS } from '../constants/jwt.constants';
+# ─── contexts/shared/constants/jwt.constants.ts ──────────────────────────────
+cat > "$SRC/contexts/shared/constants/jwt.constants.ts" << 'EOF'
+export const JWT_EXPIRATION = '15m';
+
+export const JWT_REFRESH_EXPIRATION = '7d';
+
+export const BLACKLIST_TTL_SECONDS = 15 * 60;
+
+export const REFRESH_BLACKLIST_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+export const TOKEN_LIFETIME_DESCRIPTION = '15 minutes';
+
+export const REFRESH_TOKEN_LIFETIME_DESCRIPTION = '7 days';
+EOF
+
+# ─── contexts/shared/decorators/public.decorator.ts ─────────────────────────
+cat > "$SRC/contexts/shared/decorators/public.decorator.ts" << 'EOF'
+import { SetMetadata } from '@nestjs/common';
+
+export const IS_PUBLIC_KEY = 'isPublic';
+export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
+EOF
+
+# ─── contexts/shared/guards/jwt-auth.guard.ts ───────────────────────────────
+cat > "$SRC/contexts/shared/guards/jwt-auth.guard.ts" << 'EOF'
+import {
+  CanActivate,
+  ExecutionContext,
+  Inject,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import type { Request } from 'express';
+import { TOKEN_BLACKLIST_PORT } from '../domain/ports/token-blacklist.port';
+import type { ITokenBlacklistPort } from '../domain/ports/token-blacklist.port';
+import { TOKEN_SERVICE } from '../domain/ports/token.port';
+import type { ITokenService } from '../domain/ports/token.port';
+import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+
+export interface JwtPayload {
+  sub: string;
+  email: string;
+}
 
 @Injectable()
-export class TokenBlacklistService {
-  constructor(@Inject('REDIS_CLIENT') private readonly redis: Redis) {}
+export class JwtAuthGuard implements CanActivate {
+  constructor(
+    @Inject(TOKEN_SERVICE)
+    private readonly tokenService: ITokenService,
+    private readonly reflector: Reflector,
+    @Inject(TOKEN_BLACKLIST_PORT)
+    private readonly tokenBlacklistPort: ITokenBlacklistPort,
+  ) {}
 
-  async addToBlacklist(
-    token: string,
-    expiresIn: number = BLACKLIST_TTL_SECONDS,
-  ): Promise<void> {
-    const key = `blacklist:${token}`;
-    await this.redis.setex(key, expiresIn, 'revoked');
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isPublic) return true;
+
+    const request = context.switchToHttp().getRequest<Request>();
+    const token = this.extractBearerToken(request);
+
+    if (!token) throw new UnauthorizedException('Missing access token');
+
+    let payload: JwtPayload;
+    try {
+      payload = await this.tokenService.verify<JwtPayload>(token);
+    } catch {
+      throw new UnauthorizedException('Invalid or expired token');
+    }
+
+    const blacklisted = await this.tokenBlacklistPort.isBlacklisted(token);
+    if (blacklisted) throw new UnauthorizedException('Token has been revoked');
+
+    request['user'] = payload;
+    return true;
   }
 
-  async isBlacklisted(token: string): Promise<boolean> {
-    const key = `blacklist:${token}`;
-    const result = await this.redis.get(key);
-    return result !== null;
+  private extractBearerToken(request: Request): string | null {
+    const auth = request.headers.authorization;
+    if (!auth?.startsWith('Bearer ')) return null;
+    return auth.slice(7).trim() || null;
   }
+}
+EOF
 
-  async removeFromBlacklist(token: string): Promise<void> {
-    const key = `blacklist:${token}`;
-    await this.redis.del(key);
-  }
+# ─── contexts/shared/domain/errors/domain.error.ts ──────────────────────────
+cat > "$SRC/contexts/shared/domain/errors/domain.error.ts" << 'EOF'
+export abstract class DomainError extends Error {
+  abstract readonly statusCode: number;
 
-  async clearAll(): Promise<void> {
-    const keys = await this.redis.keys('blacklist:*');
-    if (keys.length > 0) await this.redis.del(...keys);
+  constructor(message: string) {
+    super(message);
+    this.name = this.constructor.name;
   }
+}
+EOF
+
+# ─── contexts/shared/domain/ports/token.port.ts ─────────────────────────────
+cat > "$SRC/contexts/shared/domain/ports/token.port.ts" << 'EOF'
+export const TOKEN_SERVICE = Symbol('TOKEN_SERVICE');
+
+export interface ITokenService {
+  sign(
+    payload: Record<string, unknown>,
+    options?: { expiresIn?: string },
+  ): Promise<string>;
+  verify<T = Record<string, unknown>>(token: string): Promise<T>;
+  decode<T = Record<string, unknown>>(token: string): T | null;
+}
+EOF
+
+# ─── contexts/shared/domain/ports/token-blacklist.port.ts ───────────────────
+cat > "$SRC/contexts/shared/domain/ports/token-blacklist.port.ts" << 'EOF'
+export const TOKEN_BLACKLIST_PORT = 'TOKEN_BLACKLIST_PORT';
+
+export interface ITokenBlacklistPort {
+  add(token: string, ttlSeconds?: number): Promise<void>;
+  isBlacklisted(token: string): Promise<boolean>;
 }
 EOF
 
@@ -635,150 +724,28 @@ export class UserEntity extends BaseEntity {
   @Column({ type: 'varchar', length: 255, unique: true })
   email!: string;
 
-  @Column({ type: 'text' })
-  password!: string;
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  name!: string | null;
 
-  @Column({ type: 'varchar', length: 255, name: 'full_name' })
-  fullName!: string;
+  @Column({ type: 'text', name: 'password_hash', nullable: true })
+  passwordHash!: string | null;
 
-  @Column({ type: 'boolean', name: 'is_active', default: true, nullable: true })
+  @Column({ type: 'boolean', name: 'is_active', default: false })
   isActive!: boolean;
 
-  @Column({ type: 'timestamp', name: 'email_verified_at', nullable: true })
-  emailVerifiedAt!: Date;
+  @Column({ type: 'timestamptz', name: 'email_verified_at', nullable: true })
+  emailVerifiedAt!: Date | null;
 
-  @Column({
-    type: 'varchar',
-    length: 255,
-    name: 'google_id',
-    nullable: true,
-    unique: true,
-  })
+  @Column({ type: 'varchar', name: 'google_id', nullable: true })
   googleId!: string | null;
 
-  @Column({
-    type: 'varchar',
-    length: 255,
-    name: 'apple_id',
-    nullable: true,
-    unique: true,
-  })
+  @Column({ type: 'varchar', name: 'apple_id', nullable: true })
   appleId!: string | null;
 }
 EOF
 
-# ─── contexts/shared/domain/entities/auth/role.entity.ts ─────────────────────
-cat > "$SRC/contexts/shared/domain/entities/auth/role.entity.ts" << 'EOF'
-import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
-import { BaseEntity } from '../base.entity';
-
-@Entity({ schema: 'cat', name: 'roles' })
-export class RoleEntity extends BaseEntity {
-  @PrimaryGeneratedColumn()
-  id!: number;
-
-  @Column({ type: 'varchar', length: 120 })
-  name!: string;
-
-  @Column({ type: 'varchar', length: 120 })
-  slug!: string;
-
-  @Column({ type: 'text', nullable: true })
-  description!: string;
-}
-EOF
-
-# ─── contexts/shared/domain/entities/auth/permission.entity.ts ───────────────
-cat > "$SRC/contexts/shared/domain/entities/auth/permission.entity.ts" << 'EOF'
-import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
-import { BaseEntity } from '../base.entity';
-
-@Entity({ schema: 'cat', name: 'permissions' })
-export class PermissionEntity extends BaseEntity {
-  @PrimaryGeneratedColumn()
-  id!: number;
-
-  @Column({ type: 'varchar', length: 120 })
-  name!: string;
-
-  @Column({ type: 'varchar', length: 120 })
-  slug!: string;
-
-  @Column({ type: 'text', nullable: true })
-  description!: string;
-}
-EOF
-
-# ─── contexts/shared/domain/entities/auth/permission-role.entity.ts ──────────
-cat > "$SRC/contexts/shared/domain/entities/auth/permission-role.entity.ts" << 'EOF'
-import {
-  Column,
-  Entity,
-  JoinColumn,
-  ManyToOne,
-  PrimaryGeneratedColumn,
-} from 'typeorm';
-import { BaseEntity } from '../base.entity';
-import { PermissionEntity } from './permission.entity';
-import { RoleEntity } from './role.entity';
-
-@Entity({ schema: 'cat', name: 'permission_role' })
-export class PermissionRoleEntity extends BaseEntity {
-  @PrimaryGeneratedColumn()
-  id!: number;
-
-  @Column({ type: 'int', name: 'permission_id' })
-  permissionId!: number;
-
-  @ManyToOne(() => PermissionEntity)
-  @JoinColumn({ name: 'permission_id' })
-  permission!: PermissionEntity;
-
-  @Column({ type: 'int', name: 'role_id' })
-  roleId!: number;
-
-  @ManyToOne(() => RoleEntity)
-  @JoinColumn({ name: 'role_id' })
-  role!: RoleEntity;
-}
-EOF
-
-# ─── contexts/shared/domain/entities/auth/role-user.entity.ts ────────────────
-cat > "$SRC/contexts/shared/domain/entities/auth/role-user.entity.ts" << 'EOF'
-import {
-  Column,
-  Entity,
-  JoinColumn,
-  ManyToOne,
-  PrimaryGeneratedColumn,
-} from 'typeorm';
-import { BaseEntity } from '../base.entity';
-import { UserEntity } from './user.entity';
-import { RoleEntity } from './role.entity';
-
-@Entity({ schema: 'trn', name: 'role_user' })
-export class RoleUserEntity extends BaseEntity {
-  @PrimaryGeneratedColumn()
-  id!: number;
-
-  @Column({ type: 'int', name: 'role_id' })
-  roleId!: number;
-
-  @ManyToOne(() => RoleEntity)
-  @JoinColumn({ name: 'role_id' })
-  role!: RoleEntity;
-
-  @Column({ type: 'uuid', name: 'user_id' })
-  userId!: string;
-
-  @ManyToOne(() => UserEntity)
-  @JoinColumn({ name: 'user_id' })
-  user!: UserEntity;
-}
-EOF
-
-# ─── contexts/shared/domain/repositories/base-typeorm.interface.ts ───────────
-cat > "$SRC/contexts/shared/domain/repositories/base-typeorm.interface.ts" << 'EOF'
+# ─── contexts/shared/domain/repositories/base-repository.interface.ts ────────
+cat > "$SRC/contexts/shared/domain/repositories/base-repository.interface.ts" << 'EOF'
 import { DeepPartial } from 'typeorm';
 
 export interface IBaseRepository<T, ID> {
@@ -799,10 +766,6 @@ EOF
 cat > "$SRC/contexts/shared/domain/repositories/repository.tokens.ts" << 'EOF'
 export const REPOSITORY_TOKENS = {
   USER: 'USER_REPOSITORY',
-  PERMISSION: 'PERMISSION_REPOSITORY',
-  ROLE: 'ROLE_REPOSITORY',
-  PERMISSION_ROLE: 'PERMISSION_ROLE_REPOSITORY',
-  ROLE_USER: 'ROLE_USER_REPOSITORY',
 } as const;
 EOF
 
@@ -820,20 +783,39 @@ EOF
 
 # ─── contexts/shared/domain/repositories/auth/user.repository.interface.ts ───
 cat > "$SRC/contexts/shared/domain/repositories/auth/user.repository.interface.ts" << 'EOF'
-import { IBaseRepository } from '../base-typeorm.interface';
+import { IBaseRepository } from '../base-repository.interface';
 import { UserEntity } from '../../entities/auth/user.entity';
 
 export interface IUserRepository extends IBaseRepository<UserEntity, string> {
   findByEmail(email: string): Promise<UserEntity | null>;
-  findByGoogleId(googleId: string): Promise<UserEntity | null>;
-  findByAppleId(appleId: string): Promise<UserEntity | null>;
+}
+EOF
+
+# ─── contexts/shared/infrastructure/filters/domain-exception.filter.ts ───────
+cat > "$SRC/contexts/shared/infrastructure/filters/domain-exception.filter.ts" << 'EOF'
+import { ArgumentsHost, Catch, ExceptionFilter } from '@nestjs/common';
+import type { Response } from 'express';
+import { DomainError } from 'src/contexts/shared/domain/errors/domain.error';
+
+@Catch(DomainError)
+export class DomainExceptionFilter implements ExceptionFilter {
+  catch(exception: DomainError, host: ArgumentsHost): void {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<Response>();
+
+    response.status(exception.statusCode).json({
+      success: false,
+      statusCode: exception.statusCode,
+      message: exception.message,
+    });
+  }
 }
 EOF
 
 # ─── contexts/shared/infrastructure/repositories/base-typeorm.repository.ts ──
 cat > "$SRC/contexts/shared/infrastructure/repositories/base-typeorm.repository.ts" << 'EOF'
 import { DeepPartial, FindOptionsWhere, In, Repository } from 'typeorm';
-import { IBaseRepository } from '../../domain/repositories/base-typeorm.interface';
+import { IBaseRepository } from '../../domain/repositories/base-repository.interface';
 
 export abstract class BaseTypeOrmRepository<
   T extends { id: ID },
@@ -908,10 +890,11 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import { UserEntity } from '../../domain/entities/auth/user.entity';
 import { UserTypeOrmRepository } from './auth/user.typeorm.repository';
 import type { IUnitOfWork } from '../../domain/repositories/unit-of-work.interface';
+import type { IUserRepository } from '../../domain/repositories/auth/user.repository.interface';
 
 @Injectable()
 export class TypeOrmUnitOfWork implements IUnitOfWork {
-  readonly users: UserTypeOrmRepository;
+  readonly users: IUserRepository;
 
   constructor(
     private readonly dataSource: DataSource,
@@ -961,13 +944,59 @@ export class UserTypeOrmRepository
   findByEmail(email: string): Promise<UserEntity | null> {
     return this.repository.findOne({ where: { email } });
   }
+}
+EOF
 
-  findByGoogleId(googleId: string): Promise<UserEntity | null> {
-    return this.repository.findOne({ where: { googleId } });
+# ─── contexts/shared/infrastructure/services/jwt-token.service.ts ────────────
+cat > "$SRC/contexts/shared/infrastructure/services/jwt-token.service.ts" << 'EOF'
+import { Injectable } from '@nestjs/common';
+import { JwtService, JwtSignOptions } from '@nestjs/jwt';
+import type { ITokenService } from 'src/contexts/shared/domain/ports/token.port';
+
+@Injectable()
+export class JwtTokenService implements ITokenService {
+  constructor(private readonly jwtService: JwtService) {}
+
+  async sign(
+    payload: Record<string, unknown>,
+    options?: { expiresIn?: string },
+  ): Promise<string> {
+    const signOptions: JwtSignOptions | undefined = options
+      ? { expiresIn: options.expiresIn as JwtSignOptions['expiresIn'] }
+      : undefined;
+    return this.jwtService.signAsync(payload, signOptions);
   }
 
-  findByAppleId(appleId: string): Promise<UserEntity | null> {
-    return this.repository.findOne({ where: { appleId } });
+  async verify<T = Record<string, unknown>>(token: string): Promise<T> {
+    return this.jwtService.verifyAsync<T & object>(token) as Promise<T>;
+  }
+
+  decode<T = Record<string, unknown>>(token: string): T | null {
+    const result = this.jwtService.decode<T>(token);
+    return result ?? null;
+  }
+}
+EOF
+
+# ─── contexts/shared/infrastructure/services/blacklist.service.ts ────────────
+cat > "$SRC/contexts/shared/infrastructure/services/blacklist.service.ts" << 'EOF'
+import { Inject, Injectable } from '@nestjs/common';
+import { Redis } from 'ioredis';
+import { BLACKLIST_TTL_SECONDS } from 'src/contexts/shared/constants/jwt.constants';
+import type { ITokenBlacklistPort } from 'src/contexts/shared/domain/ports/token-blacklist.port';
+
+@Injectable()
+export class BlacklistService implements ITokenBlacklistPort {
+  private readonly KEY_PREFIX = 'blacklist:';
+
+  constructor(@Inject('REDIS_CLIENT') private readonly redis: Redis) {}
+
+  async add(token: string, ttlSeconds = BLACKLIST_TTL_SECONDS): Promise<void> {
+    await this.redis.setex(`${this.KEY_PREFIX}${token}`, ttlSeconds, 'revoked');
+  }
+
+  async isBlacklisted(token: string): Promise<boolean> {
+    return (await this.redis.get(`${this.KEY_PREFIX}${token}`)) !== null;
   }
 }
 EOF
@@ -979,8 +1008,13 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ALL_ENTITIES } from 'src/config/database.config';
 import { REPOSITORY_TOKENS } from './domain/repositories/repository.tokens';
 import { UNIT_OF_WORK } from './domain/repositories/unit-of-work.interface';
+import { TOKEN_SERVICE } from './domain/ports/token.port';
+import { TOKEN_BLACKLIST_PORT } from './domain/ports/token-blacklist.port';
 import { TypeOrmUnitOfWork } from './infrastructure/repositories/typeorm-unit-of-work';
 import { UserTypeOrmRepository } from './infrastructure/repositories/auth/user.typeorm.repository';
+import { JwtTokenService } from './infrastructure/services/jwt-token.service';
+import { BlacklistService } from './infrastructure/services/blacklist.service';
+import { RedisModule } from 'src/database/redis.module';
 
 const REPOSITORY_PROVIDERS = [
   { provide: REPOSITORY_TOKENS.USER, useClass: UserTypeOrmRepository },
@@ -991,14 +1025,19 @@ const UNIT_OF_WORK_PROVIDER = {
   useClass: TypeOrmUnitOfWork,
 };
 
+const TOKEN_PROVIDERS = [
+  { provide: TOKEN_SERVICE, useClass: JwtTokenService },
+  { provide: TOKEN_BLACKLIST_PORT, useClass: BlacklistService },
+];
+
 @Module({
-  imports: [TypeOrmModule.forFeature(ALL_ENTITIES)],
+  imports: [TypeOrmModule.forFeature(ALL_ENTITIES), RedisModule],
   providers: [
     ...REPOSITORY_PROVIDERS,
-    TypeOrmUnitOfWork,
     UNIT_OF_WORK_PROVIDER,
+    ...TOKEN_PROVIDERS,
   ],
-  exports: [...REPOSITORY_PROVIDERS, UNIT_OF_WORK_PROVIDER],
+  exports: [...REPOSITORY_PROVIDERS, UNIT_OF_WORK_PROVIDER, ...TOKEN_PROVIDERS],
 })
 export class SharedModule {}
 EOF
@@ -1017,88 +1056,187 @@ export const AUTH_ERRORS = {
 } as const;
 EOF
 
-# ─── contexts/user/application/dtos/auth-response.dto.ts ─────────────────────
-cat > "$SRC/contexts/user/application/dtos/auth-response.dto.ts" << 'EOF'
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+# ─── contexts/user/domain/contracts/i-auth.use-case.ts ───────────────────────
+cat > "$SRC/contexts/user/domain/contracts/i-auth.use-case.ts" << 'EOF'
+import { AuthResponseDto } from '../dtos/auth-response.dto';
+import { LoginDto } from '../dtos/login.dto';
+import { RegisterDto } from '../dtos/register.dto';
+import { ResendCodeDto } from '../dtos/resend-code.dto';
+import { VerifyEmailDto } from '../dtos/verify-email.dto';
 
+export const AUTH_USE_CASE = Symbol('AUTH_USE_CASE');
+
+export interface IAuthUseCase {
+  register(dto: RegisterDto): Promise<{ message: string }>;
+  verifyEmail(dto: VerifyEmailDto): Promise<AuthResponseDto>;
+  resendCode(dto: ResendCodeDto): Promise<{ message: string }>;
+  login(dto: LoginDto): Promise<AuthResponseDto>;
+  refresh(refreshToken: string): Promise<AuthResponseDto>;
+  logout(
+    accessToken: string,
+    refreshToken?: string,
+  ): Promise<{ message: string }>;
+  loginWithGoogle(idToken: string): Promise<AuthResponseDto>;
+  loginWithApple(
+    identityToken: string,
+    fullName?: string,
+  ): Promise<AuthResponseDto>;
+}
+EOF
+
+# ─── contexts/user/domain/dtos/auth-response.dto.ts ─────────────────────────
+cat > "$SRC/contexts/user/domain/dtos/auth-response.dto.ts" << 'EOF'
 export class UserResponseDto {
-  @ApiProperty({ example: '550e8400-e29b-41d4-a716-446655440000' })
-  id: string;
-
-  @ApiProperty({ example: 'john@example.com' })
-  email: string;
-
-  @ApiProperty({ example: 'John Doe' })
-  fullName: string;
-
-  @ApiProperty({ example: true })
-  isActive: boolean;
-
-  @ApiPropertyOptional({ example: '2024-01-15T10:30:00.000Z', nullable: true })
-  emailVerifiedAt: Date | null;
-
-  @ApiProperty({ example: '2024-01-15T10:30:00.000Z' })
-  createdAt: Date;
+  id!: string;
+  email!: string;
+  name!: string | null;
+  createdAt!: Date;
 }
 
 export class AuthResponseDto {
-  @ApiProperty({ example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' })
-  accessToken: string;
-
-  @ApiProperty({ example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' })
-  refreshToken: string;
-
-  @ApiProperty({ type: UserResponseDto })
-  user: UserResponseDto;
+  accessToken!: string;
+  refreshToken!: string;
+  user!: UserResponseDto;
 }
 EOF
 
-# ─── contexts/user/application/dtos/login.dto.ts ─────────────────────────────
-cat > "$SRC/contexts/user/application/dtos/login.dto.ts" << 'EOF'
+# ─── contexts/user/domain/dtos/login.dto.ts ──────────────────────────────────
+cat > "$SRC/contexts/user/domain/dtos/login.dto.ts" << 'EOF'
 export class LoginDto {
-  email: string;
-  password: string;
+  email!: string;
+  password!: string;
 }
 EOF
 
-# ─── contexts/user/application/dtos/register.dto.ts ──────────────────────────
-cat > "$SRC/contexts/user/application/dtos/register.dto.ts" << 'EOF'
+# ─── contexts/user/domain/dtos/register.dto.ts ───────────────────────────────
+cat > "$SRC/contexts/user/domain/dtos/register.dto.ts" << 'EOF'
 export class RegisterDto {
-  email: string;
-  password: string;
-  fullName: string;
+  email!: string;
+  password!: string;
+  fullName!: string;
 }
 EOF
 
-# ─── contexts/user/application/dtos/resend-code.dto.ts ───────────────────────
-cat > "$SRC/contexts/user/application/dtos/resend-code.dto.ts" << 'EOF'
+# ─── contexts/user/domain/dtos/resend-code.dto.ts ────────────────────────────
+cat > "$SRC/contexts/user/domain/dtos/resend-code.dto.ts" << 'EOF'
 export class ResendCodeDto {
-  email: string;
+  email!: string;
 }
 EOF
 
-# ─── contexts/user/application/dtos/social-auth.dto.ts ───────────────────────
-cat > "$SRC/contexts/user/application/dtos/social-auth.dto.ts" << 'EOF'
-export class GoogleAuthDto {
-  idToken: string;
-}
-
-export class AppleAuthDto {
-  identityToken: string;
-  fullName?: string;
-}
-EOF
-
-# ─── contexts/user/application/dtos/verify-email.dto.ts ──────────────────────
-cat > "$SRC/contexts/user/application/dtos/verify-email.dto.ts" << 'EOF'
+# ─── contexts/user/domain/dtos/verify-email.dto.ts ───────────────────────────
+cat > "$SRC/contexts/user/domain/dtos/verify-email.dto.ts" << 'EOF'
 export class VerifyEmailDto {
-  email: string;
-  code: string;
+  email!: string;
+  code!: string;
 }
 EOF
 
-# ─── contexts/user/application/ports/mail.port.ts ────────────────────────────
-cat > "$SRC/contexts/user/application/ports/mail.port.ts" << 'EOF'
+# ─── contexts/user/domain/errors/auth/index.ts ───────────────────────────────
+mkdir -p "$SRC/contexts/user/domain/errors/auth"
+cat > "$SRC/contexts/user/domain/errors/auth/index.ts" << 'EOF'
+export { UserAlreadyExistsError } from './user-already-exists.error';
+export { InvalidCredentialsError } from './invalid-credentials.error';
+export { UserInactiveError } from './user-inactive.error';
+export { InvalidOrExpiredCodeError } from './invalid-or-expired-code.error';
+export { NoPendingRegistrationError } from './no-pending-registration.error';
+export { SocialAuthFailedError } from './social-auth-failed.error';
+export { InvalidTokenError } from './invalid-token.error';
+EOF
+
+# ─── contexts/user/domain/errors/auth/invalid-credentials.error.ts ───────────
+cat > "$SRC/contexts/user/domain/errors/auth/invalid-credentials.error.ts" << 'EOF'
+import { DomainError } from 'src/contexts/shared/domain/errors/domain.error';
+
+export class InvalidCredentialsError extends DomainError {
+  readonly statusCode = 401;
+
+  constructor(message = 'Invalid credentials') {
+    super(message);
+  }
+}
+EOF
+
+# ─── contexts/user/domain/errors/auth/invalid-or-expired-code.error.ts ───────
+cat > "$SRC/contexts/user/domain/errors/auth/invalid-or-expired-code.error.ts" << 'EOF'
+import { DomainError } from 'src/contexts/shared/domain/errors/domain.error';
+
+export class InvalidOrExpiredCodeError extends DomainError {
+  readonly statusCode = 400;
+
+  constructor(message = 'Invalid or expired verification code') {
+    super(message);
+  }
+}
+EOF
+
+# ─── contexts/user/domain/errors/auth/invalid-token.error.ts ─────────────────
+cat > "$SRC/contexts/user/domain/errors/auth/invalid-token.error.ts" << 'EOF'
+import { DomainError } from 'src/contexts/shared/domain/errors/domain.error';
+
+export class InvalidTokenError extends DomainError {
+  readonly statusCode = 401;
+
+  constructor(message = 'Invalid or expired token') {
+    super(message);
+  }
+}
+EOF
+
+# ─── contexts/user/domain/errors/auth/no-pending-registration.error.ts ───────
+cat > "$SRC/contexts/user/domain/errors/auth/no-pending-registration.error.ts" << 'EOF'
+import { DomainError } from 'src/contexts/shared/domain/errors/domain.error';
+
+export class NoPendingRegistrationError extends DomainError {
+  readonly statusCode = 400;
+
+  constructor(message = 'No pending registration found for this email') {
+    super(message);
+  }
+}
+EOF
+
+# ─── contexts/user/domain/errors/auth/social-auth-failed.error.ts ────────────
+cat > "$SRC/contexts/user/domain/errors/auth/social-auth-failed.error.ts" << 'EOF'
+import { DomainError } from 'src/contexts/shared/domain/errors/domain.error';
+
+export class SocialAuthFailedError extends DomainError {
+  readonly statusCode = 401;
+
+  constructor(message = 'Social authentication failed') {
+    super(message);
+  }
+}
+EOF
+
+# ─── contexts/user/domain/errors/auth/user-already-exists.error.ts ───────────
+cat > "$SRC/contexts/user/domain/errors/auth/user-already-exists.error.ts" << 'EOF'
+import { DomainError } from 'src/contexts/shared/domain/errors/domain.error';
+
+export class UserAlreadyExistsError extends DomainError {
+  readonly statusCode = 409;
+
+  constructor(message = 'Email already registered') {
+    super(message);
+  }
+}
+EOF
+
+# ─── contexts/user/domain/errors/auth/user-inactive.error.ts ─────────────────
+cat > "$SRC/contexts/user/domain/errors/auth/user-inactive.error.ts" << 'EOF'
+import { DomainError } from 'src/contexts/shared/domain/errors/domain.error';
+
+export class UserInactiveError extends DomainError {
+  readonly statusCode = 401;
+
+  constructor(message = 'User account is inactive') {
+    super(message);
+  }
+}
+EOF
+
+# ─── contexts/user/domain/ports/mail.port.ts ─────────────────────────────────
+cat > "$SRC/contexts/user/domain/ports/mail.port.ts" << 'EOF'
 export const MAIL_PORT = 'MAIL_PORT';
 
 export interface IMailPort {
@@ -1110,8 +1248,8 @@ export interface IMailPort {
 }
 EOF
 
-# ─── contexts/user/application/ports/password.port.ts ────────────────────────
-cat > "$SRC/contexts/user/application/ports/password.port.ts" << 'EOF'
+# ─── contexts/user/domain/ports/password.port.ts ─────────────────────────────
+cat > "$SRC/contexts/user/domain/ports/password.port.ts" << 'EOF'
 export const PASSWORD_PORT = 'PASSWORD_PORT';
 
 export interface IPasswordPort {
@@ -1120,8 +1258,8 @@ export interface IPasswordPort {
 }
 EOF
 
-# ─── contexts/user/application/ports/social-auth.port.ts ─────────────────────
-cat > "$SRC/contexts/user/application/ports/social-auth.port.ts" << 'EOF'
+# ─── contexts/user/domain/ports/social-auth.port.ts ──────────────────────────
+cat > "$SRC/contexts/user/domain/ports/social-auth.port.ts" << 'EOF'
 export interface SocialUserData {
   providerId: string;
   email: string;
@@ -1139,18 +1277,8 @@ export interface IAppleAuthPort {
 }
 EOF
 
-# ─── contexts/user/application/ports/token-blacklist.port.ts ─────────────────
-cat > "$SRC/contexts/user/application/ports/token-blacklist.port.ts" << 'EOF'
-export const TOKEN_BLACKLIST_PORT = 'TOKEN_BLACKLIST_PORT';
-
-export interface ITokenBlacklistPort {
-  add(token: string, ttlSeconds?: number): Promise<void>;
-  isBlacklisted(token: string): Promise<boolean>;
-}
-EOF
-
-# ─── contexts/user/application/ports/verification-code.port.ts ───────────────
-cat > "$SRC/contexts/user/application/ports/verification-code.port.ts" << 'EOF'
+# ─── contexts/user/domain/ports/verification-code.port.ts ────────────────────
+cat > "$SRC/contexts/user/domain/ports/verification-code.port.ts" << 'EOF'
 export interface PendingRegistration {
   email: string;
   passwordHash: string;
@@ -1169,42 +1297,54 @@ EOF
 
 # ─── contexts/user/application/use-cases/auth.use-case.ts ────────────────────
 cat > "$SRC/contexts/user/application/use-cases/auth.use-case.ts" << 'EOF'
-import {
-  BadRequestException,
-  ConflictException,
-  Inject,
-  Injectable,
-  UnauthorizedException,
-} from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
-import { randomInt, randomUUID } from 'crypto';
+import { Inject, Injectable } from '@nestjs/common';
+import { randomInt } from 'crypto';
 import type { UserEntity } from 'src/contexts/shared/domain/entities/auth/user.entity';
-import { REFRESH_BLACKLIST_TTL_SECONDS } from 'src/contexts/shared/constants/jwt.constants';
+import {
+  JWT_EXPIRATION,
+  JWT_REFRESH_EXPIRATION,
+  REFRESH_BLACKLIST_TTL_SECONDS,
+} from 'src/contexts/shared/constants/jwt.constants';
 import { UNIT_OF_WORK } from 'src/contexts/shared/domain/repositories/unit-of-work.interface';
 import type { IUnitOfWork } from 'src/contexts/shared/domain/repositories/unit-of-work.interface';
-import { AUTH_ERRORS } from '../constants/auth-error.constants';
-import { AuthResponseDto, UserResponseDto } from '../dtos/auth-response.dto';
-import { LoginDto } from '../dtos/login.dto';
-import { RegisterDto } from '../dtos/register.dto';
-import { ResendCodeDto } from '../dtos/resend-code.dto';
-import { VerifyEmailDto } from '../dtos/verify-email.dto';
-import { MAIL_PORT } from '../ports/mail.port';
-import type { IMailPort } from '../ports/mail.port';
-import { PASSWORD_PORT } from '../ports/password.port';
-import type { IPasswordPort } from '../ports/password.port';
-import { TOKEN_BLACKLIST_PORT } from '../ports/token-blacklist.port';
-import type { ITokenBlacklistPort } from '../ports/token-blacklist.port';
-import { VERIFICATION_CODE_PORT } from '../ports/verification-code.port';
-import type { IVerificationCodePort } from '../ports/verification-code.port';
-import { GOOGLE_AUTH_PORT, APPLE_AUTH_PORT } from '../ports/social-auth.port';
+import {
+  InvalidCredentialsError,
+  InvalidOrExpiredCodeError,
+  NoPendingRegistrationError,
+  SocialAuthFailedError,
+  UserAlreadyExistsError,
+  UserInactiveError,
+} from '../../domain/errors/auth/index';
+import { TOKEN_SERVICE } from 'src/contexts/shared/domain/ports/token.port';
+import type { ITokenService } from 'src/contexts/shared/domain/ports/token.port';
+import { TOKEN_BLACKLIST_PORT } from 'src/contexts/shared/domain/ports/token-blacklist.port';
+import type { ITokenBlacklistPort } from 'src/contexts/shared/domain/ports/token-blacklist.port';
+import { MAIL_PORT } from '../../domain/ports/mail.port';
+import type { IMailPort } from '../../domain/ports/mail.port';
+import { PASSWORD_PORT } from '../../domain/ports/password.port';
+import type { IPasswordPort } from '../../domain/ports/password.port';
+import { VERIFICATION_CODE_PORT } from '../../domain/ports/verification-code.port';
+import type { IVerificationCodePort } from '../../domain/ports/verification-code.port';
+import {
+  GOOGLE_AUTH_PORT,
+  APPLE_AUTH_PORT,
+} from '../../domain/ports/social-auth.port';
 import type {
   IGoogleAuthPort,
   IAppleAuthPort,
-  SocialUserData,
-} from '../ports/social-auth.port';
+} from '../../domain/ports/social-auth.port';
+import type { IAuthUseCase } from '../../domain/contracts/i-auth.use-case';
+import {
+  AuthResponseDto,
+  UserResponseDto,
+} from '../../domain/dtos/auth-response.dto';
+import { LoginDto } from '../../domain/dtos/login.dto';
+import { RegisterDto } from '../../domain/dtos/register.dto';
+import { ResendCodeDto } from '../../domain/dtos/resend-code.dto';
+import { VerifyEmailDto } from '../../domain/dtos/verify-email.dto';
 
 @Injectable()
-export class AuthUseCase {
+export class AuthUseCase implements IAuthUseCase {
   constructor(
     @Inject(UNIT_OF_WORK)
     private readonly uow: IUnitOfWork,
@@ -1220,74 +1360,69 @@ export class AuthUseCase {
     private readonly googleAuthPort: IGoogleAuthPort,
     @Inject(APPLE_AUTH_PORT)
     private readonly appleAuthPort: IAppleAuthPort,
-    private readonly jwtService: JwtService,
+    @Inject(TOKEN_SERVICE)
+    private readonly tokenService: ITokenService,
   ) {}
 
   async register(dto: RegisterDto): Promise<{ message: string }> {
     const existing = await this.uow.users.findByEmail(dto.email);
-    if (existing) throw new ConflictException(AUTH_ERRORS.EMAIL_ALREADY_EXISTS);
+    if (existing) throw new UserAlreadyExistsError();
 
-    const code = this.generateCode();
     const passwordHash = await this.passwordPort.hash(dto.password);
-
+    const code = this.generateCode();
     await this.verificationCodePort.store(dto.email, code, {
       email: dto.email,
       passwordHash,
       fullName: dto.fullName,
     });
-
     await this.mailPort.sendVerificationCode(dto.email, dto.fullName, code);
-
     return { message: 'Verification code sent to your email' };
   }
 
   async verifyEmail(dto: VerifyEmailDto): Promise<AuthResponseDto> {
+    const existing = await this.uow.users.findByEmail(dto.email);
+    if (existing) throw new UserAlreadyExistsError();
+
     const pending = await this.verificationCodePort.retrieve(
       dto.email,
       dto.code,
     );
-    if (!pending)
-      throw new BadRequestException(AUTH_ERRORS.INVALID_OR_EXPIRED_CODE);
-
-    const existing = await this.uow.users.findByEmail(dto.email);
-    if (existing) throw new ConflictException(AUTH_ERRORS.EMAIL_ALREADY_EXISTS);
+    if (!pending) throw new InvalidOrExpiredCodeError();
 
     const user = await this.uow.users.create({
       email: pending.email,
-      password: pending.passwordHash,
-      fullName: pending.fullName,
+      name: pending.fullName,
+      passwordHash: pending.passwordHash,
+      isActive: true,
       emailVerifiedAt: new Date(),
     });
-
     await this.verificationCodePort.delete(dto.email);
-
     return this.buildAuthResponse(user);
   }
 
   async resendCode(dto: ResendCodeDto): Promise<{ message: string }> {
     const existing = await this.uow.users.findByEmail(dto.email);
-    if (existing) throw new ConflictException(AUTH_ERRORS.EMAIL_ALREADY_EXISTS);
+    if (existing) throw new UserAlreadyExistsError();
 
     const pending = await this.verificationCodePort.getPending(dto.email);
-    if (!pending)
-      throw new BadRequestException(AUTH_ERRORS.NO_PENDING_REGISTRATION);
+    if (!pending) throw new NoPendingRegistrationError();
 
     const code = this.generateCode();
     await this.verificationCodePort.store(dto.email, code, pending);
     await this.mailPort.sendVerificationCode(dto.email, pending.fullName, code);
-
     return { message: 'New verification code sent to your email' };
   }
 
   async login(dto: LoginDto): Promise<AuthResponseDto> {
     const user = await this.uow.users.findByEmail(dto.email);
-    if (!user) throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
-    if (!user.isActive)
-      throw new UnauthorizedException(AUTH_ERRORS.USER_INACTIVE);
+    if (!user || !user.passwordHash) throw new InvalidCredentialsError();
+    if (!user.isActive) throw new UserInactiveError();
 
-    const valid = await this.passwordPort.compare(dto.password, user.password);
-    if (!valid)
-      throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
+    const valid = await this.passwordPort.compare(
+      dto.password,
+      user.passwordHash,
+    );
+    if (!valid) throw new InvalidCredentialsError();
 
     return this.buildAuthResponse(user);
   }
@@ -1295,25 +1430,24 @@ export class AuthUseCase {
   async refresh(refreshToken: string): Promise<AuthResponseDto> {
     let payload: { sub: string; email: string };
     try {
-      payload = await this.jwtService.verifyAsync(refreshToken);
+      payload = await this.tokenService.verify<{ sub: string; email: string }>(
+        refreshToken,
+      );
     } catch {
-      throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
+      throw new InvalidCredentialsError();
     }
 
     const blacklisted =
       await this.tokenBlacklistPort.isBlacklisted(refreshToken);
-    if (blacklisted) throw new UnauthorizedException(AUTH_ERRORS.INVALID_TOKEN);
+    if (blacklisted) throw new InvalidCredentialsError();
 
     const user = await this.uow.users.findById(payload.sub);
-    if (!user) throw new UnauthorizedException(AUTH_ERRORS.INVALID_CREDENTIALS);
-    if (!user.isActive)
-      throw new UnauthorizedException(AUTH_ERRORS.USER_INACTIVE);
+    if (!user) throw new InvalidCredentialsError();
 
     await this.tokenBlacklistPort.add(
       refreshToken,
       REFRESH_BLACKLIST_TTL_SECONDS,
     );
-
     return this.buildAuthResponse(user);
   }
 
@@ -1322,7 +1456,7 @@ export class AuthUseCase {
     refreshToken?: string,
   ): Promise<{ message: string }> {
     try {
-      const decoded = this.jwtService.decode<{ exp: number }>(accessToken);
+      const decoded = this.tokenService.decode<{ exp: number }>(accessToken);
       if (decoded?.exp) {
         const ttl = Math.max(decoded.exp - Math.floor(Date.now() / 1000), 1);
         await this.tokenBlacklistPort.add(accessToken, ttl);
@@ -1337,80 +1471,73 @@ export class AuthUseCase {
         REFRESH_BLACKLIST_TTL_SECONDS,
       );
     }
-
     return { message: 'Logged out successfully' };
   }
 
   async loginWithGoogle(idToken: string): Promise<AuthResponseDto> {
-    let social: SocialUserData;
+    let socialData: Awaited<ReturnType<IGoogleAuthPort['verify']>>;
     try {
-      social = await this.googleAuthPort.verify(idToken);
+      socialData = await this.googleAuthPort.verify(idToken);
     } catch {
-      throw new UnauthorizedException(AUTH_ERRORS.SOCIAL_AUTH_FAILED);
+      throw new SocialAuthFailedError();
     }
-    return this.loginWithSocial(social, 'google');
+
+    let user = await this.uow.users.findByEmail(socialData.email);
+    if (user) {
+      if (!user.isActive) throw new UserInactiveError();
+      if (!user.googleId) {
+        await this.uow.users.update(user.id, {
+          googleId: socialData.providerId,
+        });
+      }
+    } else {
+      user = await this.uow.users.create({
+        email: socialData.email,
+        name: socialData.fullName ?? null,
+        isActive: true,
+        emailVerifiedAt: new Date(),
+        googleId: socialData.providerId,
+      });
+    }
+    return this.buildAuthResponse(user);
   }
 
   async loginWithApple(
     identityToken: string,
     fullName?: string,
   ): Promise<AuthResponseDto> {
-    let social: SocialUserData;
+    let socialData: Awaited<ReturnType<IAppleAuthPort['verify']>>;
     try {
-      social = await this.appleAuthPort.verify(identityToken);
+      socialData = await this.appleAuthPort.verify(identityToken);
     } catch {
-      throw new UnauthorizedException(AUTH_ERRORS.SOCIAL_AUTH_FAILED);
+      throw new SocialAuthFailedError();
     }
-    if (fullName) social = { ...social, fullName };
-    return this.loginWithSocial(social, 'apple');
-  }
 
-  private async loginWithSocial(
-    social: SocialUserData,
-    provider: 'google' | 'apple',
-  ): Promise<AuthResponseDto> {
-    const findByProvider =
-      provider === 'google'
-        ? (id: string) => this.uow.users.findByGoogleId(id)
-        : (id: string) => this.uow.users.findByAppleId(id);
-
-    let user = await findByProvider(social.providerId);
-
-    if (!user) {
-      user = await this.uow.users.findByEmail(social.email);
-
-      if (user) {
-        const link =
-          provider === 'google'
-            ? { googleId: social.providerId }
-            : { appleId: social.providerId };
-        user = (await this.uow.users.update(user.id, link)) ?? user;
-      } else {
-        const providerField =
-          provider === 'google'
-            ? { googleId: social.providerId }
-            : { appleId: social.providerId };
-
-        user = await this.uow.users.create({
-          email: social.email,
-          password: randomUUID(),
-          fullName: social.fullName ?? social.email.split('@')[0],
-          emailVerifiedAt: new Date(),
-          ...providerField,
+    let user = await this.uow.users.findByEmail(socialData.email);
+    if (user) {
+      if (!user.isActive) throw new UserInactiveError();
+      if (!user.appleId) {
+        await this.uow.users.update(user.id, {
+          appleId: socialData.providerId,
         });
       }
+    } else {
+      user = await this.uow.users.create({
+        email: socialData.email,
+        name: fullName ?? socialData.fullName ?? null,
+        isActive: true,
+        emailVerifiedAt: new Date(),
+        appleId: socialData.providerId,
+      });
     }
-
-    if (!user.isActive)
-      throw new UnauthorizedException(AUTH_ERRORS.USER_INACTIVE);
     return this.buildAuthResponse(user);
   }
 
   private async buildAuthResponse(user: UserEntity): Promise<AuthResponseDto> {
     const payload = { sub: user.id, email: user.email };
     const [accessToken, refreshToken] = await Promise.all([
-      this.jwtService.signAsync(payload, { expiresIn: '15m' }),
-      this.jwtService.signAsync(payload, { expiresIn: '7d' }),
+      this.tokenService.sign(payload, { expiresIn: JWT_EXPIRATION }),
+      this.tokenService.sign(payload, { expiresIn: JWT_REFRESH_EXPIRATION }),
     ]);
     return { accessToken, refreshToken, user: this.toUserResponse(user) };
   }
@@ -1423,9 +1550,7 @@ export class AuthUseCase {
     return {
       id: user.id,
       email: user.email,
-      fullName: user.fullName,
-      isActive: user.isActive,
-      emailVerifiedAt: user.emailVerifiedAt ?? null,
+      name: user.name,
       createdAt: user.createdAt,
     };
   }
@@ -1434,28 +1559,24 @@ EOF
 
 # ─── contexts/user/infrastructure/http-api/route.constants.ts ────────────────
 cat > "$SRC/contexts/user/infrastructure/http-api/route.constants.ts" << 'EOF'
-export const V1_USER = 'v1/user';
 export const V1_AUTH = 'v1/auth';
 EOF
 
 # ─── contexts/user/infrastructure/http-api/v1/auth/auth.module.ts ────────────
 cat > "$SRC/contexts/user/infrastructure/http-api/v1/auth/auth.module.ts" << 'EOF'
 import { Module } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtModule } from '@nestjs/jwt';
 import { SharedModule } from 'src/contexts/shared/shared.module';
 import { RedisModule } from 'src/database/redis.module';
 import {
   APPLE_AUTH_PORT,
   GOOGLE_AUTH_PORT,
-} from '../../../../application/ports/social-auth.port';
-import { MAIL_PORT } from '../../../../application/ports/mail.port';
-import { PASSWORD_PORT } from '../../../../application/ports/password.port';
-import { TOKEN_BLACKLIST_PORT } from '../../../../application/ports/token-blacklist.port';
-import { VERIFICATION_CODE_PORT } from '../../../../application/ports/verification-code.port';
+} from '../../../../domain/ports/social-auth.port';
+import { MAIL_PORT } from '../../../../domain/ports/mail.port';
+import { PASSWORD_PORT } from '../../../../domain/ports/password.port';
+import { VERIFICATION_CODE_PORT } from '../../../../domain/ports/verification-code.port';
 import { AuthUseCase } from '../../../../application/use-cases/auth.use-case';
+import { AUTH_USE_CASE } from '../../../../domain/contracts/i-auth.use-case';
 import { AppleAuthService } from '../../../services/apple-auth.service';
-import { BlacklistService } from '../../../services/blacklist.service';
 import { GoogleAuthService } from '../../../services/google-auth.service';
 import { MailService } from '../../../services/mail.service';
 import { PasswordService } from '../../../services/password.service';
@@ -1463,22 +1584,12 @@ import { VerificationCodeService } from '../../../services/verification-code.ser
 import { AuthController } from './controllers/auth.controller';
 
 @Module({
-  imports: [
-    SharedModule,
-    RedisModule,
-    JwtModule.registerAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('JWT_SECRET'),
-      }),
-    }),
-  ],
+  imports: [SharedModule, RedisModule],
   providers: [
-    AuthUseCase,
+    { provide: AUTH_USE_CASE, useClass: AuthUseCase },
     { provide: PASSWORD_PORT, useClass: PasswordService },
     { provide: VERIFICATION_CODE_PORT, useClass: VerificationCodeService },
     { provide: MAIL_PORT, useClass: MailService },
-    { provide: TOKEN_BLACKLIST_PORT, useClass: BlacklistService },
     { provide: GOOGLE_AUTH_PORT, useClass: GoogleAuthService },
     { provide: APPLE_AUTH_PORT, useClass: AppleAuthService },
   ],
@@ -1495,6 +1606,7 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
+  Inject,
   Post,
 } from '@nestjs/common';
 import {
@@ -1503,9 +1615,11 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { Throttle } from '@nestjs/throttler';
-import { AuthResponseDto } from '../../../../../application/dtos/auth-response.dto';
-import { AuthUseCase } from '../../../../../application/use-cases/auth.use-case';
+import { minutes, Throttle } from '@nestjs/throttler';
+import { Public } from 'src/contexts/shared/decorators/public.decorator';
+import { AUTH_USE_CASE } from '../../../../../domain/contracts/i-auth.use-case';
+import type { IAuthUseCase } from '../../../../../domain/contracts/i-auth.use-case';
+import { AuthResponseResponse } from '../responses/auth-response.response';
 import { V1_AUTH } from '../../../route.constants';
 import { AppleAuthRequest } from '../requests/apple-auth.request';
 import { GoogleAuthRequest } from '../requests/google-auth.request';
@@ -1516,17 +1630,17 @@ import { RegisterRequest } from '../requests/register.request';
 import { ResendCodeRequest } from '../requests/resend-code.request';
 import { VerifyEmailRequest } from '../requests/verify-email.request';
 
-const MIN_15 = 15 * 60 * 1000;
-const MIN_60 = 60 * 60 * 1000;
-
+@Public()
 @ApiTags('Auth')
 @Controller(V1_AUTH)
 export class AuthController {
-  constructor(private readonly authUseCase: AuthUseCase) {}
+  constructor(
+    @Inject(AUTH_USE_CASE) private readonly authUseCase: IAuthUseCase,
+  ) {}
 
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  @Throttle({ default: { limit: 5, ttl: MIN_60 } })
+  @Throttle({ default: { limit: 5, ttl: minutes(60) } })
   @ApiOperation({
     summary: 'Register a new user',
     description:
@@ -1558,7 +1672,7 @@ export class AuthController {
 
   @Post('verify-email')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 10, ttl: MIN_15 } })
+  @Throttle({ default: { limit: 10, ttl: minutes(15) } })
   @ApiOperation({
     summary: 'Verify email with code',
     description:
@@ -1567,7 +1681,7 @@ export class AuthController {
   @ApiResponse({
     status: 200,
     description: 'Email verified. Account created and tokens issued.',
-    type: AuthResponseDto,
+    type: AuthResponseResponse,
   })
   @ApiResponse({
     status: 400,
@@ -1584,7 +1698,7 @@ export class AuthController {
 
   @Post('resend-code')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 3, ttl: MIN_15 } })
+  @Throttle({ default: { limit: 3, ttl: minutes(15) } })
   @ApiOperation({
     summary: 'Resend verification code',
     description:
@@ -1613,7 +1727,7 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 10, ttl: MIN_15 } })
+  @Throttle({ default: { limit: 10, ttl: minutes(15) } })
   @ApiOperation({
     summary: 'Login with email and password',
     description:
@@ -1622,7 +1736,7 @@ export class AuthController {
   @ApiResponse({
     status: 200,
     description: 'Login successful. Tokens issued.',
-    type: AuthResponseDto,
+    type: AuthResponseResponse,
   })
   @ApiResponse({
     status: 401,
@@ -1638,7 +1752,7 @@ export class AuthController {
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 10, ttl: MIN_15 } })
+  @Throttle({ default: { limit: 10, ttl: minutes(15) } })
   @ApiOperation({
     summary: 'Refresh access token',
     description:
@@ -1647,7 +1761,7 @@ export class AuthController {
   @ApiResponse({
     status: 200,
     description: 'New token pair issued.',
-    type: AuthResponseDto,
+    type: AuthResponseResponse,
   })
   @ApiResponse({
     status: 401,
@@ -1690,7 +1804,7 @@ export class AuthController {
 
   @Post('google')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 10, ttl: MIN_15 } })
+  @Throttle({ default: { limit: 10, ttl: minutes(15) } })
   @ApiOperation({
     summary: 'Login or register with Google',
     description:
@@ -1699,7 +1813,7 @@ export class AuthController {
   @ApiResponse({
     status: 200,
     description: 'Authentication successful. Tokens issued.',
-    type: AuthResponseDto,
+    type: AuthResponseResponse,
   })
   @ApiResponse({ status: 401, description: 'Invalid or expired Google token.' })
   @ApiResponse({
@@ -1712,7 +1826,7 @@ export class AuthController {
 
   @Post('apple')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 10, ttl: MIN_15 } })
+  @Throttle({ default: { limit: 10, ttl: minutes(15) } })
   @ApiOperation({
     summary: 'Login or register with Apple',
     description:
@@ -1721,7 +1835,7 @@ export class AuthController {
   @ApiResponse({
     status: 200,
     description: 'Authentication successful. Tokens issued.',
-    type: AuthResponseDto,
+    type: AuthResponseResponse,
   })
   @ApiResponse({ status: 401, description: 'Invalid or expired Apple token.' })
   @ApiResponse({
@@ -1742,11 +1856,11 @@ import { IsEmail, IsString } from 'class-validator';
 export class LoginRequest {
   @ApiProperty({ example: 'john@example.com' })
   @IsEmail()
-  email: string;
+  email!: string;
 
   @ApiProperty({ example: 'MySecurePass123' })
   @IsString()
-  password: string;
+  password!: string;
 }
 EOF
 
@@ -1758,17 +1872,17 @@ import { IsEmail, IsString, MinLength } from 'class-validator';
 export class RegisterRequest {
   @ApiProperty({ example: 'john@example.com' })
   @IsEmail()
-  email: string;
+  email!: string;
 
   @ApiProperty({ example: 'MySecurePass123', minLength: 8 })
   @IsString()
   @MinLength(8)
-  password: string;
+  password!: string;
 
   @ApiProperty({ example: 'John Doe', minLength: 2 })
   @IsString()
   @MinLength(2)
-  fullName: string;
+  fullName!: string;
 }
 EOF
 
@@ -1780,12 +1894,12 @@ import { IsEmail, IsString, Length } from 'class-validator';
 export class VerifyEmailRequest {
   @ApiProperty({ example: 'john@example.com' })
   @IsEmail()
-  email: string;
+  email!: string;
 
   @ApiProperty({ example: '482910', minLength: 6, maxLength: 6 })
   @IsString()
   @Length(6, 6)
-  code: string;
+  code!: string;
 }
 EOF
 
@@ -1797,7 +1911,7 @@ import { IsEmail } from 'class-validator';
 export class ResendCodeRequest {
   @ApiProperty({ example: 'john@example.com' })
   @IsEmail()
-  email: string;
+  email!: string;
 }
 EOF
 
@@ -1809,7 +1923,7 @@ import { IsString } from 'class-validator';
 export class RefreshRequest {
   @ApiProperty({ example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' })
   @IsString()
-  refreshToken: string;
+  refreshToken!: string;
 }
 EOF
 
@@ -1837,7 +1951,7 @@ export class GoogleAuthRequest {
     example: 'eyJhbGciOiJSUzI1NiIsImtpZCI6IjFlOWdkazcifQ...',
   })
   @IsString()
-  idToken: string;
+  idToken!: string;
 }
 EOF
 
@@ -1852,15 +1966,46 @@ export class AppleAuthRequest {
     example: 'eyJhbGciOiJSUzI1NiIsImtpZCI6IjhlTjY...',
   })
   @IsString()
-  identityToken: string;
+  identityToken!: string;
 
   @ApiPropertyOptional({
-    description: 'Full name provided by Apple — only available on the first sign-in',
+    description:
+      'Full name provided by Apple — only available on the first sign-in',
     example: 'John Doe',
   })
   @IsOptional()
   @IsString()
   fullName?: string;
+}
+EOF
+
+# ─── .../v1/auth/responses/auth-response.response.ts ────────────────────────
+cat > "$SRC/contexts/user/infrastructure/http-api/v1/auth/responses/auth-response.response.ts" << 'EOF'
+import { ApiProperty } from '@nestjs/swagger';
+
+export class UserResponseResponse {
+  @ApiProperty({ example: '550e8400-e29b-41d4-a716-446655440000' })
+  id!: string;
+
+  @ApiProperty({ example: 'john@example.com' })
+  email!: string;
+
+  @ApiProperty({ example: 'John Doe', nullable: true })
+  name!: string | null;
+
+  @ApiProperty({ example: '2024-01-15T10:30:00.000Z' })
+  createdAt!: Date;
+}
+
+export class AuthResponseResponse {
+  @ApiProperty({ example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' })
+  accessToken!: string;
+
+  @ApiProperty({ example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...' })
+  refreshToken!: string;
+
+  @ApiProperty({ type: UserResponseResponse })
+  user!: UserResponseResponse;
 }
 EOF
 
@@ -1883,7 +2028,7 @@ import { verifyIdToken } from 'apple-signin-auth';
 import type {
   IAppleAuthPort,
   SocialUserData,
-} from '../../application/ports/social-auth.port';
+} from '../../domain/ports/social-auth.port';
 
 @Injectable()
 export class AppleAuthService implements IAppleAuthPort {
@@ -1901,34 +2046,6 @@ export class AppleAuthService implements IAppleAuthPort {
 }
 EOF
 
-# ─── contexts/user/infrastructure/services/blacklist.service.ts ──────────────
-cat > "$SRC/contexts/user/infrastructure/services/blacklist.service.ts" << 'EOF'
-import { Inject, Injectable } from '@nestjs/common';
-import { Redis } from 'ioredis';
-import {
-  BLACKLIST_TTL_SECONDS,
-  REFRESH_BLACKLIST_TTL_SECONDS,
-} from 'src/contexts/shared/constants/jwt.constants';
-import type { ITokenBlacklistPort } from '../../application/ports/token-blacklist.port';
-
-export { REFRESH_BLACKLIST_TTL_SECONDS };
-
-@Injectable()
-export class BlacklistService implements ITokenBlacklistPort {
-  private readonly KEY_PREFIX = 'blacklist:';
-
-  constructor(@Inject('REDIS_CLIENT') private readonly redis: Redis) {}
-
-  async add(token: string, ttlSeconds = BLACKLIST_TTL_SECONDS): Promise<void> {
-    await this.redis.setex(`${this.KEY_PREFIX}${token}`, ttlSeconds, 'revoked');
-  }
-
-  async isBlacklisted(token: string): Promise<boolean> {
-    return (await this.redis.get(`${this.KEY_PREFIX}${token}`)) !== null;
-  }
-}
-EOF
-
 # ─── contexts/user/infrastructure/services/google-auth.service.ts ────────────
 cat > "$SRC/contexts/user/infrastructure/services/google-auth.service.ts" << 'EOF'
 import { Injectable } from '@nestjs/common';
@@ -1937,7 +2054,7 @@ import { OAuth2Client } from 'google-auth-library';
 import type {
   IGoogleAuthPort,
   SocialUserData,
-} from '../../application/ports/social-auth.port';
+} from '../../domain/ports/social-auth.port';
 
 @Injectable()
 export class GoogleAuthService implements IGoogleAuthPort {
@@ -1969,7 +2086,7 @@ EOF
 cat > "$SRC/contexts/user/infrastructure/services/mail.service.ts" << 'EOF'
 import { Injectable } from '@nestjs/common';
 import { MailerService } from '@nestjs-modules/mailer';
-import type { IMailPort } from '../../application/ports/mail.port';
+import type { IMailPort } from '../../domain/ports/mail.port';
 
 @Injectable()
 export class MailService implements IMailPort {
@@ -1994,7 +2111,7 @@ EOF
 cat > "$SRC/contexts/user/infrastructure/services/password.service.ts" << 'EOF'
 import { Injectable } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
-import type { IPasswordPort } from '../../application/ports/password.port';
+import type { IPasswordPort } from '../../domain/ports/password.port';
 
 @Injectable()
 export class PasswordService implements IPasswordPort {
@@ -2017,7 +2134,7 @@ import { Redis } from 'ioredis';
 import type {
   IVerificationCodePort,
   PendingRegistration,
-} from '../../application/ports/verification-code.port';
+} from '../../domain/ports/verification-code.port';
 
 interface StoredVerification extends PendingRegistration {
   code: string;
@@ -2221,6 +2338,7 @@ export default tseslint.config(
   },
   {
     rules: {
+      '@typescript-eslint/no-unnecessary-type-assertion': 'off',
       '@typescript-eslint/no-unsafe-assignment': 'off',
       '@typescript-eslint/no-unsafe-argument': 'off',
       '@typescript-eslint/no-unsafe-member-access': 'off',
@@ -2233,6 +2351,124 @@ export default tseslint.config(
     },
   },
 );
+EOF
+
+# ─── .prettierrc ─────────────────────────────────────────────────────────────
+cat > "$PROJECT_PATH/.prettierrc" << 'EOF'
+{
+  "singleQuote": true,
+  "trailingComma": "all"
+}
+EOF
+
+# ─── .gitignore ───────────────────────────────────────────────────────────────
+cat > "$PROJECT_PATH/.gitignore" << 'EOF'
+# compiled output
+/dist
+/node_modules
+/build
+
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS
+.DS_Store
+
+# Tests
+/coverage
+/.nyc_output
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# temp directory
+.temp
+.tmp
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+EOF
+
+# ─── tsconfig.json ────────────────────────────────────────────────────────────
+cat > "$PROJECT_PATH/tsconfig.json" << 'EOF'
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "resolvePackageJsonExports": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2023",
+    "sourceMap": true,
+    "outDir": "./dist",
+    "baseUrl": "./",
+    "incremental": true,
+    "skipLibCheck": true,
+    "strictNullChecks": true,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitAny": false,
+    "strictBindCallApply": false,
+    "noFallthroughCasesInSwitch": false,
+    "types": ["jest", "node"]
+  }
+}
+EOF
+
+# ─── tsconfig.build.json ──────────────────────────────────────────────────────
+cat > "$PROJECT_PATH/tsconfig.build.json" << 'EOF'
+{
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
+}
+EOF
+
+# ─── nest-cli.json ────────────────────────────────────────────────────────────
+cat > "$PROJECT_PATH/nest-cli.json" << 'EOF'
+{
+  "$schema": "https://json.schemastore.org/nest-cli",
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "src",
+  "compilerOptions": {
+    "deleteOutDir": true
+  }
+}
 EOF
 
 # ─── Install architecture dependencies ───────────────────────────────────────
@@ -2265,7 +2501,8 @@ if [[ "$SKIP_INSTALL" == "false" ]]; then
     class-validator \
     class-transformer \
     handlebars \
-    nodemailer)
+    nodemailer \
+    rxjs)
 
   echo ""
   echo "Installing dev dependencies..."
@@ -2273,6 +2510,8 @@ if [[ "$SKIP_INSTALL" == "false" ]]; then
     @types/morgan \
     @types/bcryptjs \
     @types/nodemailer \
+    @types/jest \
+    @types/node \
     @eslint/js \
     eslint \
     eslint-plugin-prettier \

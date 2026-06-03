@@ -4,6 +4,7 @@
 
 # cnnp — Create New NestJS Project
 
+![Version](https://img.shields.io/badge/version-0.1.0--beta-orange)
 ![Shell](https://img.shields.io/badge/shell-bash-4EAA25?logo=gnubash&logoColor=white)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-339933?logo=nodedotjs&logoColor=white)
 ![NestJS](https://img.shields.io/badge/scaffolds-NestJS-E0234E?logo=nestjs&logoColor=white)
@@ -68,9 +69,9 @@ Hexagonal/Clean architecture focused on domain isolation. Includes a full auth f
 
 Generates a pre-filled `.env.example` at the project root — copy it to `.env` and fill in your secrets.
 
-**Database:** PostgreSQL. The template requires two schemas inside a single database: `trn` (transactional data) and `cat` (catalogues / reference data). Both must be created before running migrations.
+**Database:** PostgreSQL. Uses a `trn` schema for transactional data. Create it before running the app.
 
-**Cache / session store:** Redis. Used for JWT token blacklisting, refresh token rotation, and rate-limit counters via `@nestjs/throttler`.
+**Cache / session store:** Redis. Used for JWT token blacklisting, refresh token rotation, verification codes, and rate-limit counters via `@nestjs/throttler`.
 
 See [docs/architecture-clean.md](docs/architecture-clean.md) for the complete structure and conventions.  
 See [docs/database-setup.md](docs/database-setup.md) for database configuration and schema conventions.
@@ -83,6 +84,108 @@ cnnp/
 │   └── clean             # Clean architecture template
 ├── docs/
 │   └── architecture-clean.md
+├── .claude/
+│   └── skills/
+│       └── architecture/
+│           └── SKILL.md  # Architecture rules for Claude Code
 ├── cnnp                  # CLI entry point
 └── README.md
+```
+
+## Generated source structure
+
+```
+src/
+├── main.ts
+├── app/
+│   ├── app.module.ts
+│   └── routes/
+│       └── route.constants.ts
+├── config/
+│   ├── database.config.ts        # TypeORM config — only UserEntity registered
+│   └── mail.config.ts            # Nodemailer + Handlebars config
+├── contexts/
+│   ├── shared/
+│   │   ├── shared.module.ts      # Repos + UoW + TOKEN_SERVICE + TOKEN_BLACKLIST_PORT
+│   │   ├── application/          # (empty — shared use cases go here)
+│   │   ├── constants/
+│   │   │   └── jwt.constants.ts
+│   │   ├── decorators/
+│   │   │   └── public.decorator.ts
+│   │   ├── domain/
+│   │   │   ├── entities/
+│   │   │   │   ├── base.entity.ts
+│   │   │   │   └── auth/
+│   │   │   │       └── user.entity.ts
+│   │   │   ├── errors/
+│   │   │   │   └── domain.error.ts   # Abstract DomainError base class
+│   │   │   ├── ports/
+│   │   │   │   ├── token.port.ts         # ITokenService interface
+│   │   │   │   └── token-blacklist.port.ts
+│   │   │   ├── repositories/
+│   │   │   │   ├── base-repository.interface.ts
+│   │   │   │   ├── repository.tokens.ts
+│   │   │   │   ├── unit-of-work.interface.ts
+│   │   │   │   └── auth/
+│   │   │   │       └── user.repository.interface.ts
+│   │   │   └── validators/           # (empty)
+│   │   ├── guards/
+│   │   │   └── jwt-auth.guard.ts     # Global JWT guard using ITokenService
+│   │   ├── infrastructure/
+│   │   │   ├── filters/
+│   │   │   │   └── domain-exception.filter.ts
+│   │   │   ├── repositories/
+│   │   │   │   ├── base-typeorm.repository.ts
+│   │   │   │   ├── typeorm-unit-of-work.ts
+│   │   │   │   └── auth/
+│   │   │   │       └── user.typeorm.repository.ts
+│   │   │   └── services/
+│   │   │       ├── jwt-token.service.ts  # ITokenService impl
+│   │   │       └── blacklist.service.ts  # ITokenBlacklistPort impl
+│   │   └── interceptors/
+│   │       ├── api.response.ts
+│   │       └── api.response.interceptor.ts
+│   └── user/
+│       ├── application/
+│       │   ├── constants/
+│       │   │   └── auth-error.constants.ts
+│       │   ├── dtos/             # (empty — domain dtos used directly)
+│       │   └── use-cases/
+│       │       └── auth.use-case.ts
+│       ├── domain/
+│       │   ├── contracts/
+│       │   │   └── i-auth.use-case.ts    # IAuthUseCase interface
+│       │   ├── dtos/             # auth-response, login, register, resend-code, verify-email
+│       │   ├── errors/
+│       │   │   └── auth/         # DomainError subclasses per error type
+│       │   └── ports/            # mail, password, social-auth, verification-code
+│       └── infrastructure/
+│           ├── constants/        # (empty)
+│           ├── main.module.ts
+│           ├── http-api/
+│           │   ├── route.constants.ts
+│           │   ├── validators/   # (empty)
+│           │   └── v1/auth/
+│           │       ├── auth.module.ts
+│           │       ├── controllers/
+│           │       │   └── auth.controller.ts
+│           │       ├── requests/  # login, register, verify-email, resend-code, refresh, logout, google, apple
+│           │       └── responses/
+│           │           └── auth-response.response.ts
+│           └── services/          # password, mail, verification-code, google-auth, apple-auth
+├── database/
+│   └── redis.module.ts
+├── scripts/                      # (empty — seed scripts go here)
+├── shared/
+│   ├── http-logger/
+│   │   └── http-logger.ts        # Morgan middleware with NestJS format
+│   └── logger/
+│       └── file-logger.service.ts
+├── templates/
+│   ├── mail/
+│   │   └── confirmation.hbs
+│   └── partials/
+│       ├── header.hbs
+│       └── footer.hbs
+└── types/                        # (empty — global TypeScript types go here)
 ```
