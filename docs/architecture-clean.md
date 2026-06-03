@@ -79,7 +79,6 @@ src/
 │       ├── application/
 │       │   ├── constants/
 │       │   │   └── auth-error.constants.ts
-│       │   ├── dtos/                     # (empty)
 │       │   └── use-cases/
 │       │       └── auth.use-case.ts
 │       ├── domain/
