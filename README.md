@@ -76,19 +76,6 @@ Generates a pre-filled `.env.example` at the project root — copy it to `.env` 
 See [docs/architecture-clean.md](docs/architecture-clean.md) for the complete structure and conventions.  
 See [docs/database-setup.md](docs/database-setup.md) for database configuration and schema conventions.
 
-## Project structure
+---
 
-```
-cnnp/
-├── architectures/
-│   └── clean             # Clean architecture template
-├── docs/
-│   └── architecture-clean.md
-├── .claude/
-│   └── skills/
-│       └── architecture/
-│           └── SKILL.md  # Architecture rules for Claude Code
-├── cnnp                  # CLI entry point
-└── README.md
-```
-
+<p align="center">Made with ❤️ by <a href="https://github.com/melvincolmenares">Melvin Colmenares</a></p>
