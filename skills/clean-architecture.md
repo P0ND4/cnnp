@@ -88,6 +88,37 @@ When an HTTP request is received, the request flow must follow these steps:
 
 3. **Domain layer has zero external dependencies.** No NestJS decorators, no TypeORM imports, no third-party packages inside `domain/`.
 
+4. **One use case class per domain concept — NOT per endpoint.** Group related operations on the same entity/aggregate into a single use case class with multiple methods. Do NOT create a separate class for each HTTP verb. A controller with 5 CRUD endpoints maps to ONE use case with 5 methods — not 5 separate use case classes.
+
+   **When to split into a separate use case class:**
+   - The operation has complex business logic with cross-entity side effects (e.g. `CompleteChapterUseCase` touches chapters, paths, users, stats).
+   - The operation requires fundamentally different dependencies from the rest of the group.
+   - The operation represents a distinct business process, not just a data operation.
+
+   ```typescript
+   // ❌ WRONG — one class per endpoint (file explosion, no benefit)
+   class ListConversationsUseCase { execute() {...} }
+   class CreateConversationUseCase { execute() {...} }
+   class GetConversationUseCase { execute() {...} }
+   class UpdateConversationUseCase { execute() {...} }
+   class DeleteConversationUseCase { execute() {...} }
+
+   // ✅ CORRECT — one class per domain concept
+   class ConversationUseCase implements IConversationUseCase {
+     list(userId: string): Promise<ConversationDto[]> {...}
+     create(userId: string, dto: CreateConversationDto): Promise<ConversationDto> {...}
+     get(id: string, userId: string): Promise<ConversationDto> {...}
+     update(id: string, userId: string, dto: UpdateConversationDto): Promise<ConversationDto> {...}
+     delete(id: string, userId: string): Promise<void> {...}
+   }
+
+   // ✅ ALSO CORRECT — separate class when logic is complex/cross-context
+   class CompleteChapterUseCase implements ICompleteChapterUseCase {
+     execute(params: CompleteChapterParams): Promise<CompleteChapterResult> {...}
+     // touches chapters, paths, users, userStats, xpLevels — warrants isolation
+   }
+   ```
+
 Violation examples to REJECT immediately:
 ```typescript
 // ❌ WRONG — controller calling repo directly
@@ -95,8 +126,9 @@ constructor(@Inject(TOKENS.TAG_REPOSITORY) private repo: ITagRepository) {}
 getTags() { return this.repo.findAll(); }
 
 // ✅ CORRECT — controller calls use case
-constructor(@Inject(TOKENS.LIST_TAGS_USE_CASE) private listTagsUseCase: IListTagsUseCase) {}
-getTags(@Request() req) { return this.listTagsUseCase.execute(req.user.sub); }
+constructor(@Inject(TOKENS.CATALOG_USE_CASE) private catalogUseCase: ICatalogUseCase) {}
+getTags() { return this.catalogUseCase.listTags(); }
+getXpLevels() { return this.catalogUseCase.listXpLevels(); }
 ```
 
 ---
