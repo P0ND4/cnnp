@@ -63,7 +63,6 @@ src/
 ├── templates/
 ├──├── mail/
 ├──├── partials/
-├──├── types/
 ├── types/
 ```
 
@@ -80,6 +79,27 @@ When an HTTP request is received, the request flow must follow these steps:
 2. **controller**: Located at `src/contexts/[module]/infrastructure/http-api/v[n]/[module]/controllers/` — receives the HTTP request after passing the http-dto validation, and routes it to the corresponding use case interface `I[UseCaseName]UseCase`, located at `src/contexts/[module]/domain/contracts/`. This is an abstract interface with the parameters needed to execute the use case, not necessarily implemented here.
 3. **use case**: Located at `src/contexts/[module]/application/use-cases/` — this is where the business logic is implemented. To call the repository, it must call the repository interface located at `src/contexts/shared/domain/repositories/`, using UoW as Clean Architecture requires. If it calls an external service instead of the repository, the interface goes in `src/contexts/[module|shared]/domain/ports/` and the implementation in `src/contexts/[module|shared]/infrastructure/services/`.
 4. **repository**: Located at `src/contexts/shared/infrastructure/repositories/` — responsible for interacting with the database using the corresponding ORM, calling the entity directly at `src/contexts/shared/domain/entities/`.
+
+## ABSOLUTE RULES — Never violate these
+
+1. **Controllers NEVER inject or call repositories directly.** A controller must only call a use case interface (`I[UseCaseName]UseCase`). The path is always: Controller → Use Case → Repository. There are NO exceptions, not even for read-only or "simple" catalog endpoints. If the logic seems trivial, create a use case anyway.
+
+2. **Use cases NEVER import from infrastructure.** Use cases only depend on port interfaces (repositories, services). The concrete implementation is wired in the NestJS module — the use case never knows about TypeORM, HTTP, or any framework.
+
+3. **Domain layer has zero external dependencies.** No NestJS decorators, no TypeORM imports, no third-party packages inside `domain/`.
+
+Violation examples to REJECT immediately:
+```typescript
+// ❌ WRONG — controller calling repo directly
+constructor(@Inject(TOKENS.TAG_REPOSITORY) private repo: ITagRepository) {}
+getTags() { return this.repo.findAll(); }
+
+// ✅ CORRECT — controller calls use case
+constructor(@Inject(TOKENS.LIST_TAGS_USE_CASE) private listTagsUseCase: IListTagsUseCase) {}
+getTags(@Request() req) { return this.listTagsUseCase.execute(req.user.sub); }
+```
+
+---
 
 ## FAQ
 
